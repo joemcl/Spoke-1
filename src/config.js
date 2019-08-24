@@ -351,6 +351,13 @@ if (isClient()) {
       default: "warn",
       devDefault: "silly"
     }),
+    REQUEST_LOG_LEVEL: str({
+      desc:
+        "The log level express requests will be logged at. Must be greater than or equal to LOG_LEVEL for requests to be logged.",
+      choices: ["silly", "debug", "verbose", "info", "warn", "error"],
+      default: "verbose",
+      devDefault: "info"
+    }),
     MAILGUN_DOMAIN: host({
       desc: "The domain you set up in Mailgun. Required for Mailgun usage.",
       example: "email.bartletforamerica.com",

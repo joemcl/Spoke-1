@@ -1,6 +1,6 @@
 import "babel-polyfill";
 import { config } from "../config";
-import logger from "../logger";
+import logger, { requestLogger } from "../logger";
 import bodyParser from "body-parser";
 import express from "express";
 import appRenderer from "./middleware/app-renderer";
@@ -9,7 +9,6 @@ import cookieSession from "cookie-session";
 import { setupUserNotificationObservers } from "./notifications";
 import basicAuth from "express-basic-auth";
 import { fulfillPendingRequestFor } from "./api/assignment";
-import requestLogging from "../lib/request-logging";
 import { checkForBadDeliverability } from "./api/lib/alerts";
 import cron from "node-cron";
 import hotShots from "hot-shots";
@@ -41,11 +40,7 @@ const {
 } = config;
 
 const app = express();
-
-if (config.LOG_LEVEL === "verbose" || config.LOG_LEVEL === "debug") {
-  app.use(requestLogging);
-}
-
+app.use(requestLogger);
 app.enable("trust proxy"); // Don't rate limit heroku
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(bodyParser.urlencoded({ extended: true }));
