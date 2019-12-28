@@ -5,7 +5,7 @@ export const resolvers = {
     text: async interactionStep => interactionStep.question,
     answerOptions: async interactionStep =>
       r
-        .knex("interaction_step")
+        .reader("interaction_step")
         .select("*")
         .where({
           parent_interaction_id: interactionStep.id,
@@ -27,29 +27,36 @@ export const resolvers = {
     interactionStepId: answer => answer.interaction_step_id,
     nextInteractionStep: async answer =>
       r
-        .knex("interaction_step")
+        .reader("interaction_step")
         .first("*")
         .where({ id: answer.interaction_step_id }),
     responders: async answer =>
       r
-        .table("question_response")
-        .getAll(answer.parent_interaction_step, {
-          index: "interaction_step_id"
-        })
-        .filter({
+        .reader("question_response")
+        .join(
+          "campaign_contact",
+          "campaign_contact.id",
+          "question_response.campaign_contact_id"
+        )
+        .where({
+          interaction_step_id: answer.parent_interaction_step,
           value: answer.value
-        })
-        .eqJoin("campaign_contact_id", r.table("campaign_contact"))("right"),
+        }),
     responderCount: async answer =>
-      r
-        .table("question_response")
-        .getAll(answer.parent_interaction_step, {
-          index: "interaction_step_id"
-        })
-        .filter({
-          value: answer.value
-        })
-        .count(),
+      r.parseCount(
+        r
+          .reader("question_response")
+          .join(
+            "campaign_contact",
+            "campaign_contact.id",
+            "question_response.campaign_contact_id"
+          )
+          .where({
+            interaction_step_id: answer.parent_interaction_step,
+            value: answer.value
+          })
+          .count()
+      ),
     question: async answer => answer.parent_interaction_step
   }
 };

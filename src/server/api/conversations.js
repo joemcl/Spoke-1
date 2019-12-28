@@ -1,8 +1,10 @@
 import _ from "lodash";
 import { config } from "../../config";
-import { Assignment, r } from "../models";
+import { r } from "../models";
+import { eventBus, EventType } from "../event-bus";
 import { addWhereClauseForContactsFilterMessageStatusIrrespectiveOfPastDue } from "./assignment";
 import { buildCampaignQuery } from "./campaign";
+import { UNASSIGNED_TEXTER } from "../../lib/constants";
 
 async function getConversationsJoinsAndWhereClause(
   queryParam,
@@ -14,31 +16,75 @@ async function getConversationsJoinsAndWhereClause(
   contactNameFilter
 ) {
   let query = queryParam
-    .leftJoin("campaign_contact", "campaign.id", "campaign_contact.campaign_id")
+    .from("campaign")
+    .join("campaign_contact", "campaign.id", "campaign_contact.campaign_id")
     .leftJoin("assignment", "campaign_contact.assignment_id", "assignment.id")
     .leftJoin("user", "assignment.user_id", "user.id")
     .where({ "campaign.organization_id": organizationId });
 
-  query = buildCampaignQuery(query, organizationId, campaignsFilter);
+  // Use a campaign id subquery instead of a filter on the campaign
+  // Plays better with compound indexes
+  query = query.whereIn(
+    "campaign_contact.campaign_id",
+    buildCampaignQuery(r.reader.select("id"), organizationId, campaignsFilter)
+  );
 
   if (assignmentsFilter) {
-    if ("texterId" in assignmentsFilter && assignmentsFilter.texterId !== null)
-      query = query.where({ "assignment.user_id": assignmentsFilter.texterId });
+    // Add the campaign id subquery to the assignment_id subquery
+    // even though its duplicative of the join
+    // Enables use of partial compound index
+
+    if ("texterId" in assignmentsFilter) {
+      // Searching for Unassigned
+      if (assignmentsFilter.texterId === UNASSIGNED_TEXTER) {
+        query = query.where({ "campaign_contact.assignment_id": null });
+      }
+      // Searching for specific texter
+      else if (assignmentsFilter.texterId !== null) {
+        query = query.whereIn(
+          "campaign_contact.assignment_id",
+          r
+            .reader("assignment")
+            .select("id")
+            .whereIn(
+              "assignment.campaign_id",
+              buildCampaignQuery(
+                r.reader.select("id"),
+                organizationId,
+                campaignsFilter
+              )
+            )
+            .where({
+              user_id: assignmentsFilter.texterId
+            })
+        );
+      } else {
+        // No-op: searching for all texters
+      }
+    }
   }
 
   if (contactNameFilter) {
     if (contactNameFilter.firstName)
       query = query.where(
         "campaign_contact.first_name",
-        "like",
+        "ilike",
         `${contactNameFilter.firstName}%`
       );
     if (contactNameFilter.lastName)
       query = query.where(
         "campaign_contact.last_name",
-        "like",
+        "ilike",
         `${contactNameFilter.lastName}%`
       );
+  }
+
+  if (campaignsFilter) {
+    if ("isArchived" in campaignsFilter) {
+      query = query.whereRaw(
+        `campaign_contact.archived = ${campaignsFilter.isArchived}`
+      );
+    }
   }
 
   query = addWhereClauseForContactsFilterMessageStatusIrrespectiveOfPastDue(
@@ -47,7 +93,7 @@ async function getConversationsJoinsAndWhereClause(
   );
 
   if (contactsFilter && "isOptedOut" in contactsFilter) {
-    const subQuery = r.knex
+    const subQuery = r.reader
       .select("cell")
       .from("opt_out")
       .whereRaw("opt_out.cell=campaign_contact.cell");
@@ -59,22 +105,45 @@ async function getConversationsJoinsAndWhereClause(
   }
 
   if (tagsFilter) {
-    const subQuery = r.knex
-      .select("campaign_contact_tag.campaign_contact_id")
-      .from("campaign_contact_tag")
-      .join("tag", "tag.id", "=", "campaign_contact_tag.tag_id")
-      .where({
-        "tag.title": "Escalated",
-        "tag.organization_id": organizationId
-      })
-      .whereRaw(
-        "campaign_contact_tag.campaign_contact_id = campaign_contact.id"
-      );
-
     if (tagsFilter.escalatedConvosOnly) {
-      query = query.whereExists(subQuery);
+      query = query
+        .join(
+          "campaign_contact_tag",
+          "campaign_contact_tag.campaign_contact_id",
+          "=",
+          "campaign_contact.id"
+        )
+        .join("tag", "tag.id", "=", "campaign_contact_tag.tag_id")
+        .where({
+          "tag.title": "Escalated",
+          "tag.organization_id": organizationId
+        });
+
+      // query = query.whereExists(subQuery);
     } else if (tagsFilter.excludeEscalated) {
-      query = query.whereNotExists(subQuery);
+      query = query.whereNotExists(
+        r.reader
+          .select("campaign_contact_tag.campaign_contact_id")
+          .from("campaign_contact_tag")
+          .join("tag", "tag.id", "=", "campaign_contact_tag.tag_id")
+          .where({
+            "tag.title": "Escalated",
+            "tag.organization_id": organizationId
+          })
+          .whereRaw(
+            "campaign_contact_tag.campaign_contact_id = campaign_contact.id"
+          )
+      );
+    }
+
+    if (tagsFilter.specificTagIds && tagsFilter.specificTagIds.length > 0) {
+      const specificTagIdsSubquery = r.reader
+        .select("campaign_contact_tag.campaign_contact_id")
+        .from("campaign_contact_tag")
+        .join("tag", "tag.id", "=", "campaign_contact_tag.tag_id")
+        .whereIn("tag.id", tagsFilter.specificTagIds);
+
+      query = query.whereIn("campaign_contact.id", specificTagIdsSubquery);
     }
   }
 
@@ -109,7 +178,7 @@ export async function getConversations(
 ) {
   /* Query #1 == get campaign_contact.id for all the conversations matching
    * the criteria with offset and limit. */
-  let offsetLimitQuery = r.knex.select("campaign_contact.id as cc_id");
+  let offsetLimitQuery = r.reader.select("campaign_contact.id as cc_id");
 
   offsetLimitQuery = (await getConversationsJoinsAndWhereClause(
     offsetLimitQuery,
@@ -121,15 +190,15 @@ export async function getConversations(
     contactNameFilter
   )).query;
 
-  offsetLimitQuery = offsetLimitQuery.join(
-    r.knex.raw(
+  offsetLimitQuery = offsetLimitQuery.leftJoin(
+    r.reader.raw(
       "message on message.id = ( select id from message where campaign_contact_id = campaign_contact.id order by created_at desc limit 1 )"
     )
   );
 
   offsetLimitQuery = offsetLimitQuery
-    .orderBy("message.created_at", "desc")
-    .orderBy("campaign_contact.updated_at", "desc")
+    .orderByRaw("message.created_at desc nulls last")
+    .orderByRaw("campaign_contact.updated_at desc nulls last")
     .orderBy("cc_id");
 
   offsetLimitQuery = offsetLimitQuery.limit(cursor.limit).offset(cursor.offset);
@@ -141,7 +210,7 @@ export async function getConversations(
 
   /* Query #2 -- get all the columns we need, including messages, using the
    * cc_ids from Query #1 to scope the results to limit, offset */
-  let query = r.knex.select(
+  let query = r.reader.select(
     "campaign_contact.id as cc_id",
     "campaign_contact.first_name as cc_first_name",
     "campaign_contact.last_name as cc_last_name",
@@ -216,7 +285,13 @@ export async function getConversations(
     .map(contactId => {
       const contactMessages = groupedContacts[contactId];
       const firstRow = contactMessages[0];
+
       const conversation = _.omit(firstRow, messageFields);
+
+      if (firstRow) {
+        conversation.updated_at = firstRow.created_at;
+      }
+
       conversation.messages = contactMessages
         // Sort ASC to display most recent _messages_ last
         .sort((messageA, messageB) => messageA.created_at - messageB.created_at)
@@ -236,7 +311,7 @@ export async function getConversations(
   const conversationsCount = await r.parseCount(
     (await getConversationsJoinsAndWhereClause(
       // Only grab one field in order to minimize bandwidth
-      r.knex.count("*"),
+      r.reader.count("*"),
       organizationId,
       campaignsFilter,
       assignmentsFilter,
@@ -265,7 +340,7 @@ export async function getCampaignIdMessageIdsAndCampaignIdContactIdsMaps(
   tagsFilter,
   contactsFilter
 ) {
-  let query = r.knex.select(
+  let query = r.reader.select(
     "campaign_contact.id as cc_id",
     "campaign.id as cmp_id",
     "message.id as mess_id"
@@ -330,7 +405,7 @@ export async function getCampaignIdMessageIdsAndCampaignIdContactIdsMapsChunked(
   contactsFilter,
   contactNameFilter
 ) {
-  let query = r.knex.select(
+  let query = r.reader.select(
     "campaign_contact.id as cc_id",
     "campaign.id as cmp_id",
     "message.id as mess_id"
@@ -374,9 +449,7 @@ export async function getCampaignIdMessageIdsAndCampaignIdContactIdsMapsChunked(
 export const reassignContacts = async (campaignContactIds, newTexterId) => {
   const result = await r.knex.transaction(async trx => {
     // Fetch more complete information for campaign contacts
-    const campaignContacts = await r
-      .knex("campaign_contact")
-      .transacting(trx)
+    const campaignContacts = await trx("campaign_contact")
       .select(["id", "campaign_id"])
       .whereIn("id", campaignContactIds);
 
@@ -386,9 +459,7 @@ export const reassignContacts = async (campaignContactIds, newTexterId) => {
     await Promise.all(
       campaignIds.map(async campaignId => {
         // See if newTexter already has an assignment for this campaign
-        const existingAssignment = await r
-          .knex("assignment")
-          .transacting(trx)
+        const existingAssignment = await trx("assignment")
           .where({
             campaign_id: campaignId,
             user_id: newTexterId
@@ -397,33 +468,28 @@ export const reassignContacts = async (campaignContactIds, newTexterId) => {
         let assignmentId = existingAssignment && existingAssignment.id;
         if (!assignmentId) {
           // Create a new assignment if none exists
-          const inserted = await r
-            .knex("assignment")
-            .transacting(trx)
+          const [newAssignment] = await trx("assignment")
             .insert({
               campaign_id: campaignId,
               user_id: newTexterId
             })
-            .returning("id");
-          assignmentId = inserted[0];
+            .returning("*");
+          eventBus.emit(EventType.AssignmentCreated, newAssignment);
+          assignmentId = newAssignment.id;
         }
 
         // Update the contact's assignment
         const contactIds = contactsByCampaignId[campaignId].map(
           contact => contact.id
         );
-        await r
-          .knex("campaign_contact")
-          .transacting(trx)
+        await trx("campaign_contact")
           .update({
             assignment_id: assignmentId
           })
           .whereIn("id", contactIds);
 
         // Update the conversations messages
-        await r
-          .knex("message")
-          .transacting(trx)
+        await trx("message")
           .update({ assignment_id: assignmentId })
           .whereIn("campaign_contact_id", contactIds);
       })
@@ -443,17 +509,23 @@ export async function reassignConversations(
   const campaignIdAssignmentIdMap = new Map();
   for (const [campaignId, _] of campaignIdContactIdsMap) {
     let assignment = await r
-      .table("assignment")
-      .getAll(newTexterUserId, { index: "user_id" })
-      .filter({ campaign_id: campaignId })
-      .limit(1)(0)
-      .default(null);
-    if (!assignment) {
-      assignment = await Assignment.save({
+      .knex("assignment")
+      .where({
         user_id: newTexterUserId,
-        campaign_id: campaignId,
-        max_contacts: config.MAX_CONTACTS_PER_TEXTER
-      });
+        campaign_id: campaignId
+      })
+      .first();
+    if (!assignment) {
+      const [newAssignment] = await r
+        .knex("assignment")
+        .insert({
+          user_id: newTexterUserId,
+          campaign_id: campaignId,
+          max_contacts: config.MAX_CONTACTS_PER_TEXTER
+        })
+        .returning("*");
+      eventBus.emit(EventType.AssignmentCreated, newAssignment);
+      assignment = newAssignment;
     }
     campaignIdAssignmentIdMap.set(campaignId, assignment.id);
   }
@@ -463,9 +535,7 @@ export async function reassignConversations(
 
     for (const [campaignId, campaignContactIds] of campaignIdContactIdsMap) {
       const assignmentId = campaignIdAssignmentIdMap.get(campaignId);
-      await r
-        .knex("campaign_contact")
-        .transacting(trx)
+      await trx("campaign_contact")
         .where("campaign_id", campaignId)
         .whereIn("id", campaignContactIds)
         .update({
@@ -480,9 +550,7 @@ export async function reassignConversations(
 
     for (const [campaignId, messageIds] of campaignIdMessagesIdsMap) {
       const assignmentId = campaignIdAssignmentIdMap.get(campaignId);
-      await r
-        .knex("message")
-        .transacting(trx)
+      await trx("message")
         .whereIn("id", messageIds)
         .update({
           assignment_id: assignmentId

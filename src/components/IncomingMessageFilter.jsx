@@ -12,6 +12,9 @@ import MenuItem from "material-ui/MenuItem";
 import theme from "../styles/theme";
 import { dataSourceItem } from "./utils";
 
+import { nameComponents } from "../lib/attributes";
+import { UNASSIGNED_TEXTER, ALL_TEXTERS } from "../lib/constants";
+
 import { StyleSheet, css } from "aphrodite";
 
 const styles = StyleSheet.create({
@@ -64,9 +67,10 @@ export const ALL_CAMPAIGNS = -1;
 
 export const CAMPAIGN_TYPE_FILTERS = [[ALL_CAMPAIGNS, "All Campaigns"]];
 
-export const ALL_TEXTERS = -1;
-
-export const TEXTER_FILTERS = [[ALL_TEXTERS, "All Texters"]];
+export const TEXTER_FILTERS = [
+  [UNASSIGNED_TEXTER, "Unassigned"],
+  [ALL_TEXTERS, "All Texters"]
+];
 
 const IDLE_KEY_TIME = 500;
 
@@ -140,19 +144,7 @@ class IncomingMessageFilter extends Component {
 
   onContactNameChanged = ev => {
     const name = ev.target.value;
-    let firstName, lastName;
-    const splitName = name ? name.split(" ") : ["First", "Last"];
-    if (splitName.length == 1) {
-      firstName = splitName[0];
-      lastName = "";
-    } else if (splitName.length == 2) {
-      firstName = splitName[0];
-      lastName = splitName[1];
-    } else {
-      firstName = splitName[0];
-      lastName = splitName.slice(1, splitName.length + 1).join(" ");
-    }
-
+    const { firstName, lastName } = nameComponents(name);
     this.state.firstName = firstName;
     this.state.lastName = lastName;
     clearTimeout(this.submitNameUpdateTimeout);
@@ -314,6 +306,34 @@ class IncomingMessageFilter extends Component {
               floatingLabelText="Filter by Contact Name"
             />
           </div>
+
+          <div className={css(styles.spacer)}>
+            <div className={css(styles.flexColumn)}>
+              <SelectField
+                multiple
+                value={this.props.tagsFilter}
+                hintText="Filter by Contact Tags"
+                fullWidth
+                floatingLabelFixed
+                onChange={this.props.onTagsChanged}
+              >
+                {this.props.tags.map(({ id, title }) => {
+                  const isChecked =
+                    this.props.tagsFilter && this.props.tagsFilter.includes(id);
+
+                  return (
+                    <MenuItem
+                      key={id}
+                      value={id}
+                      primaryText={title}
+                      insetChildren
+                      checked={isChecked}
+                    />
+                  );
+                })}
+              </SelectField>
+            </div>
+          </div>
         </CardText>
       </Card>
     );
@@ -329,6 +349,7 @@ IncomingMessageFilter.propTypes = {
   isTexterFilterable: type.bool.isRequired,
   isIncludeEscalatedFilterable: type.bool.isRequired,
   onCampaignChanged: type.func.isRequired,
+  onTagsChanged: type.func.isRequired,
   onTexterChanged: type.func.isRequired,
   includeEscalated: type.bool.isRequired,
   onIncludeEscalatedChanged: type.func.isRequired,
@@ -345,7 +366,13 @@ IncomingMessageFilter.propTypes = {
   onMessageFilterChanged: type.func.isRequired,
   assignmentsFilter: type.shape({
     texterId: type.number
-  }).isRequired
+  }).isRequired,
+  tags: type.shape({
+    specificTagIds: type.arrayOf(
+      type.shape({ id: type.string, title: type.string })
+    )
+  }),
+  tagsFilter: type.arrayOf(type.string).isRequired
 };
 
 export default IncomingMessageFilter;

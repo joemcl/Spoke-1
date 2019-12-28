@@ -19,6 +19,7 @@ import {
   graphqlRouter,
   nexmoRouter,
   twilioRouter,
+  assembleRouter,
   utilsRouter
 } from "./routes";
 
@@ -44,6 +45,14 @@ const app = express();
 
 if (config.LOG_LEVEL === "verbose" || config.LOG_LEVEL === "debug") {
   app.use(requestLogging);
+}
+
+// Send version to client
+if (config.SPOKE_VERSION) {
+  app.use((_req, res, next) => {
+    res.setHeader("x-spoke-version", config.SPOKE_VERSION);
+    next();
+  });
 }
 
 app.enable("trust proxy"); // Don't rate limit heroku
@@ -90,6 +99,7 @@ app.use(authRouter);
 app.use(graphqlRouter);
 app.use(nexmoRouter);
 app.use(twilioRouter);
+app.use(assembleRouter);
 app.use(utilsRouter);
 
 app.post(
@@ -112,9 +122,14 @@ app.post(
     try {
       const numberAssigned = await fulfillPendingRequestFor(req.body.slack_id);
       return res.json({ numberAssigned });
-    } catch (ex) {
-      logger.error("Error handling autoassignment request", ex);
-      return res.status(500).json({ error: ex.message });
+    } catch (err) {
+      logger.error("Error handling autoassignment request: ", err);
+      return err.isFatal
+        ? res.status(500).json({ error: err.message })
+        : res.status(200).json({
+            numberAssigned: 0,
+            info: err.message
+          });
     }
   }
 );

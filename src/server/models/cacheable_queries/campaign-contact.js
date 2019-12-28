@@ -1,6 +1,6 @@
 import { config } from "../../../config";
 import logger from "../../../logger";
-import { r, CampaignContact } from "../../models";
+import { r } from "../../models";
 import { optOutCache } from "./opt-out";
 
 // <campaignContactId>
@@ -17,7 +17,7 @@ import { optOutCache } from "./opt-out";
 //   - location{} (join on zip)
 //     - city
 //     - state
-//     - timezone{ offset, hasDST }
+//     - timezone
 
 //   OTHER DATA
 //   - optout
@@ -110,7 +110,10 @@ export const campaignContactCache = {
         return cacheData;
       }
     }
-    return await CampaignContact.get(id);
+    return await r
+      .reader("campaign_contact")
+      .where({ id })
+      .first();
   },
   loadMany: async (organization, { campaign, queryFunc }) => {
     // queryFunc(query) has query input of a knex query
@@ -120,7 +123,7 @@ export const campaignContactCache = {
     }
     // 1. load the data
     let query = r
-      .knex("campaign_contact")
+      .reader("campaign_contact")
       .leftJoin("zip_code", "zip_code.zip", "campaign_contact.zip")
       .leftJoin("assignment", "assignment.id", "campaign_contact.assignment_id")
       .select(

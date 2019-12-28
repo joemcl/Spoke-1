@@ -73,6 +73,11 @@ if (isClient()) {
         "Webhook URL to notify when there are no more assignable campaign contacts.",
       default: undefined
     }),
+    ASSIGNMENT_COMPLETE_NOTIFICATION_TEAM_IDS: str({
+      desc:
+        "Comma separated list of team IDs to restrict 'assignment complete' notifications to.",
+      default: ""
+    }),
     AUTH0_DOMAIN: host({
       desc: "Domain name on Auth0 account",
       example: "example.auth0.com",
@@ -168,6 +173,11 @@ if (isClient()) {
       example: "postgres://username:password@127.0.0.1:5432/db_name",
       default: undefined
     }),
+    DATABASE_READER_URL: url({
+      desc: "Database reader connection URL",
+      example: "postgres://username:password@127.0.0.1:5432/db_name",
+      default: undefined
+    }),
     DB_HOST: host({
       desc: "Domain or IP address of database host.",
       example: "pg-db.example.org",
@@ -227,8 +237,8 @@ if (isClient()) {
     }),
     DEFAULT_SERVICE: str({
       desc: "Default SMS service.",
-      choices: ["twilio", "nexmo", "fakeservice"],
-      default: "fakeservice"
+      choices: ["assemble-numbers", "twilio", "nexmo", "fakeservice"],
+      default: undefined
     }),
     DEFAULT_ORG: num({
       desc:
@@ -274,6 +284,11 @@ if (isClient()) {
       desc:
         "Whether to disable texter notifications – if true, should be implemented externally.",
       default: false
+    }),
+    DISABLED_TEXTER_NOTIFICATION_TYPES: str({
+      desc: "Comma-separated list of notification names to ignore.",
+      example: "assignment.message.received,assignment.updated",
+      default: ""
     }),
     EMAIL_FROM: email({
       desc:
@@ -589,6 +604,11 @@ if (isClient()) {
     SKIP_TWILIO_VALIDATION: bool({
       desc: "Whether to bypass Twilio header validation altogether.",
       default: false
+    }),
+    SPOKE_VERSION: str({
+      desc: "The version of Spoke running",
+      default: "no-version",
+      isClient: true
     }),
     WAREHOUSE_DB_TYPE: str({
       desc:

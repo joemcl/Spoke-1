@@ -20,16 +20,17 @@ export const schema = `
     id: ID
     title: String!
     description: String!
-    textColor: String!
-    backgroundColor: String!
-    confirmationSteps: [[String]]!
-    onApplyScript: String!
-    webhookUrl: String!
+    textColor: String
+    backgroundColor: String
+    confirmationSteps: [[String]]
+    onApplyScript: String
+    webhookUrl: String
     isAssignable: Boolean!
   }
 
   input TagsFilter {
     excludeEscalated: Boolean
     escalatedConvosOnly: Boolean
+    specificTagIds: [String]
   }
 `;

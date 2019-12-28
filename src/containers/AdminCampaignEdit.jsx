@@ -1,10 +1,14 @@
 import PropTypes from "prop-types";
 import React from "react";
 import isEqual from "lodash/isEqual";
+import moment from "moment";
 
+import Dialog from "material-ui/Dialog";
+import FlatButton from "material-ui/FlatButton";
 import WarningIcon from "material-ui/svg-icons/alert/warning";
 import DoneIcon from "material-ui/svg-icons/action/done";
 import CancelIcon from "material-ui/svg-icons/navigation/cancel";
+import { red600 } from "material-ui/styles/colors";
 
 import Avatar from "material-ui/Avatar";
 import theme from "../styles/theme";
@@ -39,8 +43,6 @@ const campaignInfoFragment = `
   logoImageUrl
   introHtml
   primaryColor
-  overrideOrganizationTextingHours
-  textingHoursEnforced
   textingHoursStart
   textingHoursEnd
   isAssignmentLimitedToTeams
@@ -77,22 +79,16 @@ const campaignInfoFragment = `
   editors
 `;
 
-const valueOverrides = {
-  overrideOrganizationTextingHours: true,
-  textingHoursEnforced: true
-};
-
 class AdminCampaignEdit extends React.Component {
   constructor(props) {
     super(props);
     const isNew = props.location.query.new;
     this.state = {
       expandedSection: isNew ? 0 : null,
-      campaignFormValues: Object.assign(
-        props.campaignData.campaign,
-        valueOverrides
-      ),
-      startingCampaign: false
+      campaignFormValues: Object.assign({}, props.campaignData.campaign),
+      startingCampaign: false,
+      isWorking: false,
+      requestError: undefined
     };
   }
 
@@ -144,7 +140,7 @@ class AdminCampaignEdit extends React.Component {
     }
 
     this.setState({
-      campaignFormValues: Object.assign({}, pushToFormValues, valueOverrides)
+      campaignFormValues: Object.assign({}, pushToFormValues)
     });
   }
 
@@ -266,10 +262,25 @@ class AdminCampaignEdit extends React.Component {
           newCampaign.interactionSteps
         );
       }
-      await this.props.mutations.editCampaign(
-        this.props.campaignData.campaign.id,
-        newCampaign
-      );
+
+      this.setState({ isWorking: true });
+      try {
+        const response = await this.props.mutations.editCampaign(
+          this.props.campaignData.campaign.id,
+          newCampaign
+        );
+        if (response.errors) throw new Error(response.errors);
+      } catch (err) {
+        const isJsonError = err.message.includes(
+          "Unexpected token < in JSON at position 0"
+        );
+        const errorMessage = isJsonError
+          ? "There was an error with your request. This is likely due to uploading a contact list that is too large."
+          : err.message;
+        this.setState({ requestError: errorMessage });
+      } finally {
+        this.setState({ isWorking: false });
+      }
 
       this.pollDuringActiveJobs();
     }
@@ -332,6 +343,15 @@ class AdminCampaignEdit extends React.Component {
           this.state.campaignFormValues.title !== "" &&
           this.state.campaignFormValues.description !== "" &&
           this.state.campaignFormValues.dueBy !== null
+      },
+      {
+        title: "Texting Hours",
+        content: CampaignTextingHoursForm,
+        keys: ["textingHoursStart", "textingHoursEnd", "timezone"],
+        checkCompleted: () => true,
+        blocksStarting: false,
+        expandAfterCampaignStarts: true,
+        expandableBySuperVolunteers: false
       },
       {
         title: "Contacts",
@@ -429,6 +449,9 @@ class AdminCampaignEdit extends React.Component {
         expandAfterCampaignStarts: true,
         expandableBySuperVolunteers: true,
         extraProps: {
+          isOverdue: moment().isSameOrAfter(
+            this.props.campaignData.campaign.dueBy
+          ),
           orgTexters: this.props.organizationData.organization.texters,
           organizationUuid: this.props.organizationData.organization.uuid,
           campaignId: this.props.campaignData.campaign.id
@@ -459,21 +482,6 @@ class AdminCampaignEdit extends React.Component {
         extraProps: {
           customFields: this.props.campaignData.campaign.customFields
         }
-      },
-      {
-        title: "Texting Hours",
-        content: CampaignTextingHoursForm,
-        keys: [
-          "overrideOrganizationTextingHours",
-          "textingHoursEnforced",
-          "textingHoursStart",
-          "textingHoursEnd",
-          "timezone"
-        ],
-        checkCompleted: () => true,
-        blocksStarting: false,
-        expandAfterCampaignStarts: true,
-        expandableBySuperVolunteers: false
       },
       {
         title: "Autoassign Mode",
@@ -534,15 +542,22 @@ class AdminCampaignEdit extends React.Component {
   }
 
   renderCampaignFormSection(section, forceDisable) {
-    let shouldDisable =
-      forceDisable || (!this.isNew() && this.checkSectionSaved(section));
+    const { isWorking } = this.state;
+    const shouldDisable =
+      isWorking ||
+      (forceDisable || (!this.isNew() && this.checkSectionSaved(section)));
+    const saveLabel = isWorking
+      ? "Working..."
+      : this.isNew()
+        ? "Save and goto next section"
+        : "Save";
     const ContentComponent = section.content;
     const formValues = this.getSectionState(section);
     return (
       <ContentComponent
         onChange={this.handleChange}
         formValues={formValues}
-        saveLabel={this.isNew() ? "Save and goto next section" : "Save"}
+        saveLabel={saveLabel}
         saveDisabled={shouldDisable}
         ensureComplete={this.props.campaignData.campaign.isStarted}
         onSubmit={this.handleSubmit}
@@ -554,20 +569,23 @@ class AdminCampaignEdit extends React.Component {
   }
 
   renderHeader() {
-    const title =
-      this.props.campaignData &&
-      this.props.campaignData.campaign &&
-      this.props.campaignData.campaign.title;
+    const {
+      campaign: { dueBy, isStarted, title } = {}
+    } = this.props.campaignData;
 
-    const notStarting = this.props.campaignData.campaign.isStarted ? (
+    const isOverdue = moment().isSameOrAfter(dueBy);
+
+    const notStarting = isStarted ? (
       <div
         {...dataTest("campaignIsStarted")}
         style={{
-          color: theme.colors.green,
+          color: isOverdue ? red600 : theme.colors.green,
           fontWeight: 800
         }}
       >
-        This campaign is running!
+        {isOverdue
+          ? "This campaign is running but is overdue!"
+          : "This campaign is running!"}
         {this.renderCurrentEditors()}
       </div>
     ) : (
@@ -680,10 +698,18 @@ class AdminCampaignEdit extends React.Component {
       </div>
     );
   }
+
+  handleCloseError = () => this.setState({ requestError: undefined });
+
   render() {
     const sections = this.sections();
-    const { expandedSection } = this.state;
+    const { expandedSection, requestError } = this.state;
     const { adminPerms } = this.props.params;
+
+    const errorActions = [
+      <FlatButton label="Ok" primary={true} onClick={this.handleCloseError} />
+    ];
+
     return (
       <div>
         {this.renderHeader()}
@@ -785,6 +811,14 @@ class AdminCampaignEdit extends React.Component {
             </Card>
           );
         })}
+        <Dialog
+          title="Request Error"
+          actions={errorActions}
+          open={requestError !== undefined}
+          onRequestClose={this.handleCloseError}
+        >
+          {requestError || ""}
+        </Dialog>
       </div>
     );
   }

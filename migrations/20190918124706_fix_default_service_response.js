@@ -1,4 +1,10 @@
-exports.up = function(knex, Promise) {
+/**
+ * To clean up existing service responses, run the SQL in this PR:
+ *
+ * https://github.com/politics-rewired/Spoke/pull/289#issue-318906142
+ */
+
+exports.up = function(knex) {
   // Add stringified empty array as default
   return knex.schema.alterTable("message", table => {
     table
@@ -8,7 +14,7 @@ exports.up = function(knex, Promise) {
   });
 };
 
-exports.down = function(knex, Promise) {
+exports.down = function(knex) {
   // Revert to default of empty string
   return knex.schema.alterTable("message", table => {
     table

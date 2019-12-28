@@ -1,21 +1,13 @@
 import { config } from "../config";
 import logger from "../logger";
-import {
-  r,
-  datawarehouse,
-  cacheableData,
-  Assignment,
-  Campaign,
-  CampaignContact,
-  Organization,
-  User,
-  UserOrganization
-} from "../server/models";
+import { eventBus, EventType } from "../server/event-bus";
+import { r, datawarehouse, cacheableData } from "../server/models";
 import { gunzip, zipToTimeZone, convertOffsetsToStrings } from "../lib";
 import { updateJob } from "./lib";
 import { getFormattedPhoneNumber } from "../lib/phone-format.js";
 import serviceMap from "../server/api/lib/services";
 import {
+  assignMissingMessagingServices,
   getLastMessage,
   saveNewIncomingMessage
 } from "../server/api/lib/message-sending";
@@ -32,7 +24,7 @@ import gsJson from "./exports/gs-json";
 import zipCodeToTimeZone from "zipcode-to-timezone";
 
 const CHUNK_SIZE = 1000;
-const BATCH_SIZE = config.DB_MAX_POOL;
+const BATCH_SIZE = Math.max(1, Math.floor(config.DB_MAX_POOL * 0.5));
 
 const zipMemoization = {};
 let warehouseConnection = null;
@@ -172,17 +164,23 @@ export async function processSqsMessages() {
 export async function uploadContacts(job) {
   const campaignId = job.campaign_id;
   // We do this deletion in schema.js but we do it again here just in case the the queue broke and we had a backlog of contact uploads for one campaign
-  const campaign = await Campaign.get(campaignId);
-  const organization = await Organization.get(campaign.organization_id);
+  const campaign = await r
+    .knex("campaign")
+    .where({ id: campaignId })
+    .first();
+  const organization = await r
+    .knex("organization")
+    .where({ id: campaign.organization_id })
+    .first();
   const orgFeatures = JSON.parse(organization.features || "{}");
 
   const numbersApiKey = orgFeatures.numbersApiKey;
   let numbersClient, numbersRequest, landlinesFilteredOut;
 
   await r
-    .table("campaign_contact")
-    .getAll(campaignId, { index: "campaign_id" })
-    .delete();
+    .knex("campaign_contact")
+    .where({ campaign_id: campaignId })
+    .del();
 
   let jobPayload = await gunzip(new Buffer(job.payload, "base64"));
   jobPayload = JSON.parse(jobPayload);
@@ -250,14 +248,11 @@ export async function uploadContacts(job) {
         })
       );
 
-      const service = serviceMap[config.DEFAULT_SERVICE];
-      if (service.ensureAllNumbersHaveMessagingServiceSIDs) {
-        await service.ensureAllNumbersHaveMessagingServiceSIDs(
-          trx,
-          campaignId,
-          campaign.organization_id
-        );
-      }
+      await assignMissingMessagingServices(
+        trx,
+        campaignId,
+        campaign.organization_id
+      );
     }
 
     if (shouldRemoveLandlines) {
@@ -357,9 +352,9 @@ export async function uploadContacts(job) {
         .update({ result_message: jobMessages.join("\n") });
     } else {
       await r
-        .table("job_request")
-        .get(job.id)
-        .delete();
+        .knex("job_request")
+        .where({ id: job.id })
+        .del();
     }
   }
   await cacheableData.campaign.reload(campaignId);
@@ -373,11 +368,8 @@ export async function loadContactsFromDataWarehouseFragment(jobEvent) {
     jobEvent.offset,
     jobEvent
   );
-  const insertOptions = {
-    batchSize: 1000
-  };
   const jobCompleted = await r
-    .knex("job_request")
+    .reader("job_request")
     .where("id", jobEvent.jobId)
     .select("status")
     .first();
@@ -472,14 +464,14 @@ export async function loadContactsFromDataWarehouseFragment(jobEvent) {
     })
   );
 
-  await CampaignContact.save(savePortion, insertOptions);
+  await r.knex.batchInsert("campaign_contact", savePortion, 1000);
   await r
     .knex("job_request")
     .where("id", jobEvent.jobId)
     .increment("status", 1);
   const validationStats = {};
   const completed = await r
-    .knex("job_request")
+    .reader("job_request")
     .where("id", jobEvent.jobId)
     .select("status")
     .first();
@@ -557,9 +549,9 @@ export async function loadContactsFromDataWarehouseFragment(jobEvent) {
         });
     }
     await r
-      .table("job_request")
-      .get(jobEvent.jobId)
-      .delete();
+      .knex("job_request")
+      .where({ id: jobEvent.jobId })
+      .del();
     await cacheableData.campaign.reload(jobEvent.campaignId);
     return { completed: 1, validationStats };
   } else if (jobEvent.part < jobEvent.totalParts - 1) {
@@ -624,7 +616,10 @@ export async function loadContactsFromDataWarehouse(job) {
     r.kninky && r.kninky.defaultsUnsupported
       ? 10 // sqlite has a max of 100 variables and ~8 or so are used per insert
       : 10000; // default
-  const campaign = await Campaign.get(job.campaign_id);
+  const campaign = await r
+    .knex("campaign")
+    .where({ id: job.campaign_id })
+    .first();
   const totalParts = Math.ceil(knexCount / STEP);
 
   if (totalParts > 1 && /LIMIT/.test(sqlQuery)) {
@@ -743,7 +738,7 @@ export async function assignTexters(job) {
   */
   const payload = JSON.parse(job.payload);
   const cid = job.campaign_id;
-  const campaign = (await r.knex("campaign").where({ id: cid }))[0];
+  const campaign = (await r.reader("campaign").where({ id: cid }))[0];
   const texters = payload.texters;
   const currentAssignments = await r
     .knex("assignment")
@@ -823,24 +818,24 @@ export async function assignTexters(job) {
       for (const assignmentIds of demotedChunks) {
         // Here we unassign ALL the demotedTexters contacts (not just the demotion count)
         // because they will get reapportioned below
-        await r
-          .knex("campaign_contact")
-          .transacting(trx)
+        await trx("campaign_contact")
           .where("assignment_id", "in", assignmentIds)
-          .where({ message_status: "needsMessage" })
+          .where({
+            message_status: "needsMessage"
+          })
+          .whereRaw(`archived = ${campaign.is_archived}`) // partial index friendly
           .update({ assignment_id: null });
       }
 
       await updateJob(job, 20);
 
       let availableContacts = await r.getCount(
-        r
-          .knex("campaign_contact")
-          .transacting(trx)
+        trx("campaign_contact")
           .where({
             assignment_id: null,
             campaign_id: cid
           })
+          .whereRaw(`archived = ${campaign.is_archived}`) // partial index friendly
       );
 
       const newAssignments = [],
@@ -915,14 +910,16 @@ export async function assignTexters(job) {
       await Promise.all(
         dynamicAssignments.map(async assignment => {
           const { id, max_contacts } = assignment;
-          await r
-            .knex("assignment")
-            .transacting(trx)
+          await trx("assignment")
             .where({ id })
             .update({ max_contacts });
         })
       );
 
+      /**
+       * Using SQL injection to avoid passing archived as a binding
+       * Should help with guaranteeing partial index usage
+       */
       const assignContacts = async directive => {
         const {
           assignment: { id: assignment_id, campaign_id },
@@ -936,6 +933,7 @@ export async function assignTexters(job) {
               where
                 assignment_id is null
                 and campaign_id = ?
+                and archived = ${campaign.is_archived}
               limit ?
               for update skip locked
             )
@@ -973,12 +971,11 @@ export async function assignTexters(job) {
           // TODO - MySQL Specific. Must not do a bulk insert in order to be MySQL compatible
           const assignmentIds = await Promise.all(
             chunk.map(async directive => {
-              const assignmentIds = await r
-                .knex("assignment")
-                .transacting(trx)
-                .insert([directive.assignment])
-                .returning("id");
-              return assignmentIds[0];
+              const [newAssignment] = await trx("assignment")
+                .insert(directive.assignment)
+                .returning("*");
+              eventBus.emit(EventType.AssignmentCreated, newAssignment);
+              return newAssignment.id;
             })
           );
 
@@ -1023,9 +1020,7 @@ export async function assignTexters(job) {
       // dynamic assignments, having zero initially is ok
       if (!campaign.use_dynamic_assignment) {
         // TODO - MySQL Specific. Look up in separate query as MySQL does not support LIMIT within subquery
-        const assignmentIds = await r
-          .knex("assignment")
-          .transacting(trx)
+        const assignmentIds = await trx("assignment")
           .select("assignment.id as id")
           .where("assignment.campaign_id", cid)
           .leftJoin(
@@ -1037,9 +1032,7 @@ export async function assignTexters(job) {
           .havingRaw("COUNT(campaign_contact.id) = 0")
           .map(result => result.id);
 
-        await r
-          .knex("assignment")
-          .transacting(trx)
+        await trx("assignment")
           .delete()
           .whereIn("id", assignmentIds);
       }
@@ -1067,24 +1060,26 @@ export async function assignTexters(job) {
  */
 const fetchExportData = async job => {
   const { campaign_id: campaignId, payload: rawPayload } = job;
-  const { requester: requesterId } = JSON.parse(rawPayload);
+  const { requester: requesterId, isAutomatedExport = false } = JSON.parse(
+    rawPayload
+  );
   const { title: campaignTitle } = await r
-    .knex("campaign")
+    .reader("campaign")
     .first("title")
     .where({ id: campaignId });
 
   const { email: notificationEmail } = await r
-    .knex("user")
+    .reader("user")
     .first("email")
     .where({ id: requesterId });
 
   const interactionSteps = await r
-    .knex("interaction_step")
+    .reader("interaction_step")
     .select("*")
     .where({ campaign_id: campaignId });
 
   const assignments = await r
-    .knex("assignment")
+    .reader("assignment")
     .where("campaign_id", campaignId)
     .join("user", "user_id", "user.id")
     .select(
@@ -1101,7 +1096,8 @@ const fetchExportData = async job => {
     campaignTitle,
     notificationEmail,
     interactionSteps,
-    assignments
+    assignments,
+    isAutomatedExport
   };
 };
 
@@ -1141,7 +1137,7 @@ const processContactsChunk = async (
   questionsById,
   lastContactId = 0
 ) => {
-  const { rows } = await r.knex.raw(
+  const { rows } = await r.reader.raw(
     `
       with campaign_contacts as (
         select *
@@ -1229,7 +1225,7 @@ const processContactsChunk = async (
 };
 
 const processMessagesChunk = async (campaignId, lastContactId = 0) => {
-  const { rows } = await r.knex.raw(
+  const { rows } = await r.reader.raw(
     `
       with campaign_contact_ids as (
         select id
@@ -1237,6 +1233,11 @@ const processMessagesChunk = async (campaignId, lastContactId = 0) => {
         where
           campaign_id = ?
           and id > ?
+          and exists (
+            select 1
+            from message
+            where campaign_contact_id = campaign_contact.id
+          )
         order by
           id asc
         limit ?
@@ -1321,14 +1322,17 @@ export async function exportCampaign(job) {
     campaignTitle = undefined,
     notificationEmail = undefined,
     interactionSteps = undefined,
-    assignments = undefined;
+    assignments = undefined,
+    isAutomatedExport = undefined;
+
   try {
     ({
       campaignId,
       campaignTitle,
       notificationEmail,
       interactionSteps,
-      assignments
+      assignments,
+      isAutomatedExport
     } = await fetchExportData(job));
   } catch (exc) {
     logger.error("Error fetching export data:", exc);
@@ -1402,27 +1406,31 @@ export async function exportCampaign(job) {
     const objectKeyPrefix = config.AWS_S3_KEY_PREFIX;
     const safeTitle = campaignTitle.replace(/ /g, "_").replace(/\//g, "_");
     const timestamp = moment().format("YYYY-MM-DD-HH-mm-ss");
-    const campaignContactsKey = `${objectKeyPrefix}${safeTitle}-${timestamp}.csv`;
-    const messagesKey = `${campaignContactsKey}-messages.csv`;
+    let campaignContactsKey = `${objectKeyPrefix}${safeTitle}`;
+    if (!isAutomatedExport)
+      campaignContactsKey = `${campaignContactsKey}-${timestamp}`;
+    const messagesKey = `${campaignContactsKey}-messages`;
     try {
       const [campaignExportUrl, campaignMessagesExportUrl] = await Promise.all([
-        uploadToCloud(campaignContactsKey, campaignsCsv),
-        uploadToCloud(messagesKey, messagesCsv)
+        uploadToCloud(`${campaignContactsKey}.csv`, campaignsCsv),
+        uploadToCloud(`${messagesKey}.csv`, messagesCsv)
       ]);
-      await sendEmail({
-        to: notificationEmail,
-        subject: `Export ready for ${campaignTitle}`,
-        text:
-          `Your Spoke exports are ready! These URLs will be valid for 24 hours.` +
-          `    Campaign export: ${campaignExportUrl}` +
-          `    Message export: ${campaignMessagesExportUrl}`
-      }).catch(err => {
-        logger.error(err);
-        logger.info(`Campaign Export URL - ${campaignExportUrl}`);
-        logger.info(
-          `Campaign Messages Export URL - ${campaignMessagesExportUrl}`
-        );
-      });
+      if (!isAutomatedExport) {
+        await sendEmail({
+          to: notificationEmail,
+          subject: `Export ready for ${campaignTitle}`,
+          text:
+            `Your Spoke exports are ready! These URLs will be valid for 24 hours.` +
+            `    Campaign export: ${campaignExportUrl}` +
+            `    Message export: ${campaignMessagesExportUrl}`
+        }).catch(err => {
+          logger.error(err);
+          logger.info(`Campaign Export URL - ${campaignExportUrl}`);
+          logger.info(
+            `Campaign Messages Export URL - ${campaignMessagesExportUrl}`
+          );
+        });
+      }
       logger.info(`Successfully exported ${campaignId}`);
     } catch (err) {
       logger.error("Error uploading to cloud storage", err);
@@ -1457,9 +1465,7 @@ export async function sendMessages(queryFunc, defaultStatus) {
     await knex.transaction(async trx => {
       let messages = [];
       try {
-        let messageQuery = r
-          .knex("message")
-          .transacting(trx)
+        let messageQuery = trx("message")
           .forUpdate()
           .where({ send_status: defaultStatus || "QUEUED" });
 
@@ -1512,7 +1518,7 @@ export async function sendMessages(queryFunc, defaultStatus) {
 
 export async function handleIncomingMessageParts() {
   const messageParts = await r
-    .knex("pending_message_part")
+    .reader("pending_message_part")
     .select("*")
     .limit(100);
   const messagePartsByService = {};
@@ -1546,7 +1552,7 @@ export async function handleIncomingMessageParts() {
       const serviceMessageId = part.service_id;
       const savedCount = await r.parseCount(
         r
-          .knex("message")
+          .reader("message")
           .where({ service_id: serviceMessageId })
           .count()
       );
@@ -1642,20 +1648,21 @@ export async function fixOrgless() {
       .leftJoin("user_organization", "user.id", "user_organization.user_id")
       .whereNull("user_organization.id");
     orgless.forEach(async orglessUser => {
-      await UserOrganization.save({
-        user_id: orglessUser.id.toString(),
-        organization_id: config.DEFAULT_ORG,
-        role: "TEXTER"
-      }).error(function(error) {
-        // Unexpected errors
+      try {
+        await r.knex.insert({
+          user_id: orglessUser.id.toString(),
+          organization_id: config.DEFAULT_ORG,
+          role: "TEXTER"
+        });
+        logger.info(
+          "added orgless user " +
+            user.id +
+            " to organization " +
+            config.DEFAULT_ORG
+        );
+      } catch (err) {
         logger.error("error on userOrganization save in orgless", error);
-      });
-      logger.error(
-        "added orgless user " +
-          user.id +
-          " to organization " +
-          config.DEFAULT_ORG
-      );
+      }
     }); // forEach
   } // if
 } // function

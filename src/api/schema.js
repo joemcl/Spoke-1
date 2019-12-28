@@ -132,8 +132,6 @@ const rootSchema = `
     texters: [TexterInput]
     interactionSteps: InteractionStepInput
     cannedResponses: [CannedResponseInput]
-    overrideOrganizationTextingHours: Boolean
-    textingHoursEnforced: Boolean
     textingHoursStart: Int
     textingHoursEnd: Int
     isAutoassignEnabled: Boolean
@@ -299,9 +297,11 @@ const rootSchema = `
     bulkReassignCampaignContacts(organizationId:String!, campaignsFilter:CampaignsFilter, assignmentsFilter:AssignmentsFilter, tagsFilter: TagsFilter contactsFilter:ContactsFilter, newTexterUserId:String!):[CampaignIdAssignmentId]
     megaReassignCampaignContacts(organizationId:String!, campaignIdsContactIds:[CampaignIdContactId]!, newTexterUserIds:[String]):[CampaignIdAssignmentId]
     megaBulkReassignCampaignContacts(organizationId:String!, campaignsFilter:CampaignsFilter, assignmentsFilter:AssignmentsFilter, tagsFilter: TagsFilter, contactsFilter:ContactsFilter, newTexterUserIds:[String]):[CampaignIdAssignmentId]
-    requestTexts(count: Int!, email: String!, organizationId: String!): String!
+    requestTexts(count: Int!, email: String!, organizationId: String!, preferredTeamId: Int!): String!
     releaseMessages(campaignId: String!, target: ReleaseActionTarget!, ageInHours: Int): String!
     markForSecondPass(campaignId: String!, excludeAgeInHours: Int): String!
+    unMarkForSecondPass(campaignId: String!): String!
+    deleteNeedsMessage(campaignId: String!): String!
     insertLinkDomain(organizationId: String!, domain: String!, maxUsageCount: Int!): LinkDomain!
     updateLinkDomain(organizationId: String!, domainId: String!, payload: UpdateLinkDomain!): LinkDomain!
     deleteLinkDomain(organizationId: String!, domainId: String!): Boolean!

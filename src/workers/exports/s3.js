@@ -8,9 +8,15 @@ const createS3 = (bucket, endpointUrl = awsEndpoint) => {
   if (endpointUrl) {
     endpoint = new AWS.Endpoint(endpointUrl);
   }
+  const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY } = process.env;
+  const credentials = new AWS.Credentials(
+    AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY
+  );
   const s3Client = new AWS.S3({
     signatureVersion: "v4",
     params: { Bucket: bucket },
+    credentials,
     endpoint
   });
   return s3Client;
@@ -40,7 +46,12 @@ const getDownloadUrl = async (bucket, key) => {
   const s3Client = createS3(bucket);
   const expiresSeconds = 60 * 60 * 24;
   const options = { Key: key, Expires: expiresSeconds };
-  return s3Client.getSignedUrl("getObject", options);
+  return new Promise((resolve, reject) => {
+    s3Client.getSignedUrl("getObject", options, (err, url) => {
+      if (err) reject(err);
+      resolve(url);
+    });
+  });
 };
 
 module.exports = {

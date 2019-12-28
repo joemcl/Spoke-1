@@ -1,35 +1,77 @@
 import AuthHasher from "passport-local-authenticate";
 
-import { User, Invite, Organization } from "./models";
+import { r } from "./models";
 import { capitalizeWord } from "./api/lib/utils";
 
-const errorMessages = {
-  invalidInvite: "Invalid invite code. Contact your administrator.",
-  invalidCredentials: "Invalid username or password",
-  emailTaken: "That email is already taken.",
-  passwordsDontMatch: "Passwords don't match.",
-  invalidResetHash:
-    "Invalid username or password reset link. Contact your administrator.",
-  noSamePassword: "Old and new password can't be the same"
-};
+export class LocalAuthError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = this.constructor.name;
+    this.errorType = "LocalAuthError";
+  }
+}
+
+export class InvalidInviteError extends LocalAuthError {
+  constructor() {
+    super("Invalid invite code. Contact your administrator.");
+  }
+}
+
+export class InvalidCredentialsError extends LocalAuthError {
+  constructor() {
+    super("Invalid username or password");
+  }
+}
+
+export class EmailTakenError extends LocalAuthError {
+  constructor() {
+    super("That email is already taken.");
+  }
+}
+
+export class MismatchedPasswordsError extends LocalAuthError {
+  constructor() {
+    super("Passwords don't match.");
+  }
+}
+
+export class InvalidResetHashError extends LocalAuthError {
+  constructor() {
+    super(
+      "Invalid username or password reset link. Contact your administrator."
+    );
+  }
+}
+
+export class StalePasswordError extends LocalAuthError {
+  constructor() {
+    super("Old and new password can't be the same");
+  }
+}
 
 const validUuid = async (nextUrl, uuidMatch) => {
-  if (!nextUrl) throw new Error(errorMessages.invalidInvite);
+  if (!nextUrl) throw new InvalidInviteError();
 
-  let foundUUID;
+  let matchingRecord;
   if (nextUrl.includes("join")) {
-    foundUUID = await Organization.filter({ uuid: uuidMatch[0] });
+    matchingRecord = await r
+      .knex("organization")
+      .where({ uuid: uuidMatch[0] })
+      .first("id");
   } else if (nextUrl.includes("invite")) {
     const splitUrl = nextUrl.split("/");
     const inviteHash = splitUrl[splitUrl.length - 1];
-    foundUUID = await Invite.filter({ hash: inviteHash });
+    matchingRecord = await r
+      .knex("invite")
+      .where({ hash: inviteHash })
+      .first("id");
   }
 
-  if (foundUUID.length === 0) throw new Error(errorMessages.invalidInvite);
+  if (matchingRecord) throw new InvalidInviteError();
 };
 
 const login = async ({ password, existingUser, nextUrl, uuidMatch }) => {
-  if (!existingUser) throw new Error(errorMessages.invalidCredentials);
+  if (!existingUser) throw new InvalidCredentialsError();
 
   // Get salt and hash and verify user password
   const pwFieldSplit = existingUser.auth0_id.split("|");
@@ -39,11 +81,11 @@ const login = async ({ password, existingUser, nextUrl, uuidMatch }) => {
   };
   return new Promise((resolve, reject) => {
     AuthHasher.verify(password, hashed, (err, verified) => {
-      if (err) reject(err);
+      if (err) reject(new LocalAuthError(err.message));
       if (verified) {
         resolve(existingUser);
       }
-      reject({ message: errorMessages.invalidCredentials });
+      reject(new InvalidCredentialsError());
     });
   });
 };
@@ -62,28 +104,31 @@ const signup = async ({
 
   // Verify user doesn't already exist
   if (existingUser && existingUser.email === lowerCaseEmail) {
-    throw new Error(errorMessages.emailTaken);
+    throw new EmailTakenError();
   }
 
   // Verify password and password confirm fields match
   if (password !== reqBody.passwordConfirm) {
-    throw new Error(errorMessages.passwordsDontMatch);
+    throw new MismatchedPasswordsError();
   }
 
   // create the user
   return new Promise((resolve, reject) => {
     AuthHasher.hash(password, async function(err, hashed) {
-      if (err) reject(err);
+      if (err) reject(new LocalAuthError(err.message));
       // .salt and .hash
       const passwordToSave = `localauth|${hashed.salt}|${hashed.hash}`;
-      const user = await User.save({
-        email: lowerCaseEmail,
-        auth0_id: passwordToSave,
-        first_name: capitalizeWord(reqBody.firstName),
-        last_name: capitalizeWord(reqBody.lastName),
-        cell: reqBody.cell,
-        is_superadmin: false
-      });
+      const [user] = await r
+        .knex("user")
+        .insert({
+          email: lowerCaseEmail,
+          auth0_id: passwordToSave,
+          first_name: capitalizeWord(reqBody.firstName),
+          last_name: capitalizeWord(reqBody.lastName),
+          cell: reqBody.cell,
+          is_superadmin: false
+        })
+        .returning("*");
       resolve(user);
     });
   });
@@ -91,38 +136,39 @@ const signup = async ({
 
 const reset = ({ password, existingUser, reqBody, uuidMatch }) => {
   if (!existingUser) {
-    throw new Error(errorMessages.invalidResetHash);
+    throw new InvalidResetHashError();
   }
 
   // Get user resetHash and date of hash creation
   const pwFieldSplit = existingUser.auth0_id.split("|");
   const [resetHash, datetime] = [pwFieldSplit[1], pwFieldSplit[2]];
 
-  // Verify hash was created in the last 15 mins
-  const isExpired = (Date.now() - datetime) / 1000 / 60 > 15;
+  // Verify hash was created in the last day
+  const isExpired = (Date.now() - datetime) / 1000 / 60 / 60 > 24;
   if (isExpired) {
-    throw new Error(errorMessages.invalidResetHash);
+    throw new InvalidResetHashError();
   }
 
   // Verify the UUID in request matches hash in DB
   if (uuidMatch[0] !== resetHash) {
-    throw new Error(errorMessages.invalidResetHash);
+    throw new InvalidResetHashError();
   }
 
   // Verify passwords match
   if (password !== reqBody.passwordConfirm) {
-    throw new Error(errorMessages.passwordsDontMatch);
+    throw new MismatchedPasswordsError();
   }
 
   // Save new user password to DB
   return new Promise((resolve, reject) => {
     AuthHasher.hash(password, async function(err, hashed) {
-      if (err) reject(err);
+      if (err) reject(new LocalAuthError(err.message));
       // .salt and .hash
       const passwordToSave = `localauth|${hashed.salt}|${hashed.hash}`;
-      const updatedUser = await User.get(existingUser.id)
+      const updatedUser = await r
+        .knex("user")
         .update({ auth0_id: passwordToSave })
-        .run();
+        .where({ id: existingUser.id });
       resolve(updatedUser);
     });
   });
@@ -138,25 +184,25 @@ export const change = ({ user, password, newPassword, passwordConfirm }) => {
 
   // Verify password and password confirm fields match
   if (newPassword !== passwordConfirm) {
-    throw new Error(errorMessages.passwordsDontMatch);
+    throw new MismatchedPasswordsError();
   }
 
   // Verify old and new passwords are different
   if (password === newPassword) {
-    throw new Error(errorMessages.noSamePassword);
+    throw new StalePasswordError();
   }
 
   return new Promise((resolve, reject) => {
     AuthHasher.verify(password, hashedPassword, (error, verified) => {
-      if (error) return reject(error);
-      if (!verified) return reject(errorMessages.invalidCredentials);
+      if (error) reject(new LocalAuthError(error.message));
+      if (!verified) reject(new InvalidCredentialsError());
       return AuthHasher.hash(newPassword, async function(err, hashed) {
-        if (err) reject(err);
-        // .salt and .hash
+        if (err) reject(new LocalAuthError(err.message));
         const passwordToSave = `localauth|${hashed.salt}|${hashed.hash}`;
-        const updatedUser = await User.get(user.id)
+        const updatedUser = await r
+          .knex("user")
           .update({ auth0_id: passwordToSave })
-          .run();
+          .where({ id: user.id });
         resolve(updatedUser);
       });
     });

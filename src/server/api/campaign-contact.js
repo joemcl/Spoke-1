@@ -1,35 +1,26 @@
 import logger from "../../logger";
-import { CampaignContact, r, cacheableData } from "../models";
-import { mapFieldsToModel } from "./lib/utils";
+import { r, cacheableData } from "../models";
+import { sqlResolvers, getTzOffset } from "./lib/utils";
 import { getTopMostParent, zipToTimeZone } from "../../lib";
 import { accessRequired } from "./errors";
-import moment from "moment-timezone";
 
 export const resolvers = {
   Location: {
-    timezone: zipCode => zipCode || {},
     city: zipCode => zipCode.city || "",
     state: zipCode => zipCode.state || ""
   },
-  Timezone: {
-    offset: zipCode => zipCode.timezone_offset || null,
-    hasDST: zipCode => zipCode.has_dst || null
-  },
   CampaignContact: {
-    ...mapFieldsToModel(
-      [
-        "id",
-        "firstName",
-        "lastName",
-        "cell",
-        "zip",
-        "customFields",
-        "messageStatus",
-        "assignmentId",
-        "external_id"
-      ],
-      CampaignContact
-    ),
+    ...sqlResolvers([
+      "id",
+      "firstName",
+      "lastName",
+      "cell",
+      "zip",
+      "customFields",
+      "messageStatus",
+      "assignmentId",
+      "external_id"
+    ]),
     updatedAt: async campaignContact => {
       let updatedAt;
       if (
@@ -63,7 +54,7 @@ export const resolvers = {
         return []; // it's the beginning, so there won't be any
       }
       const qr_results = await r
-        .knex("question_response")
+        .reader("question_response")
         .join(
           "interaction_step as istep",
           "question_response.interaction_step_id",
@@ -86,7 +77,7 @@ export const resolvers = {
     },
     questionResponses: async (campaignContact, _, { loaders }) => {
       const results = await r
-        .knex("question_response as qres")
+        .reader("question_response as qres")
         .where("qres.campaign_contact_id", campaignContact.id)
         .join(
           "interaction_step",
@@ -157,33 +148,15 @@ export const resolvers = {
       }
       return Object.values(formatted);
     },
-    location: async (campaignContact, _, { loaders }) => {
-      if (campaignContact.timezone) {
-        const offset =
-          moment.tz.zone(campaignContact.timezone).utcOffset(Date.now()) / 60;
-        const loc = {
-          timezone_offset: offset,
-          has_dst: false
-        };
-        return loc;
-      }
-      const mainZip = campaignContact.zip.split("-")[0];
-      const calculated = zipToTimeZone(mainZip);
-      if (calculated) {
-        return {
-          timezone_offset: calculated[2],
-          has_dst: calculated[3] === 1
-        };
-      }
-      return await loaders.zipCode.load(mainZip);
-    },
+    location: async (campaignContact, _, { loaders }) =>
+      loaders.zipCode.load(campaignContact.zip.split("-")[0]),
     messages: async campaignContact => {
       if ("messages" in campaignContact) {
         return campaignContact.messages;
       }
 
       let messages = await r
-        .knex("message")
+        .reader("message")
         .where({ campaign_contact_id: campaignContact.id })
         .orderBy("created_at");
 
@@ -193,7 +166,7 @@ export const resolvers = {
         campaignContact.message_status !== "needsMessage"
       ) {
         messages = await r
-          .knex("message")
+          .reader("message")
           .where({
             assignment_id: campaignContact.assignment_id,
             contact_number: campaignContact.cell
@@ -241,13 +214,13 @@ export const resolvers = {
     contactTags: async (campaignContact, _, { user }) => {
       const { campaign_id } = campaignContact;
       const { organization_id } = await r
-        .knex("campaign")
+        .reader("campaign")
         .where({ id: campaign_id })
         .first("organization_id");
       await accessRequired(user, organization_id, "TEXTER");
 
       return r
-        .knex("tag")
+        .reader("tag")
         .select("tag.*")
         .join(
           "campaign_contact_tag",
